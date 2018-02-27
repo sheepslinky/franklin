@@ -185,11 +185,74 @@ class Machine: # {{{
 		sys.stdout.write(json.dumps(data) + '\n')
 		sys.stdout.flush()
 	# }}}
+	def _refresh_queue(self):
+		if self.uuid is None:
+			return
+		spool = fhs.read_spool(self.uuid, dir = True, opened = False)
+		if spool is None:
+			return
+		gcode = os.path.join(spool, 'gcode')
+		audio = os.path.join(spool, 'audio')
+		probe = fhs.read_spool(os.path.join(self.uuid, 'probe' + os.extsep + 'bin'), text = False)
+		if probe is not None:
+			try:
+				# Map = [[targetx, targety, x0, y0, w, h], [nx, ny], [[...], [...], ...]]
+				size = struct.calcsize('@ddddddddLLd')
+				targetx, targety, x0, y0, w, h, sina, cosa, nx, ny, self.targetangle = struct.unpack('@ddddddddLLd', probe.read(size))
+				self.gcode_angle = math.sin(self.targetangle), math.cos(self.targetangle)
+				sina, cosa = self.gcode_angle
+				limits = [targetx, targety, x0, y0, w, h]
+				nums = [nx, ny, self.targetangle]
+				if not (0 < nx < 1000 and 0 < ny < 1000):
+					raise ValueError('probe map too large; probably invalid')
+				probes = [[None for x in range(nx + 1)] for y in range(ny + 1)]
+				for y in range(ny + 1):
+					for x in range(nx + 1):
+						probes[y][x] = struct.unpack('@d', probe.read(struct.calcsize('@d')))[0]
+				self.probemap = [limits, nums, probes]
+			except:
+				log('Failed to load probe map')
+			self._globals_update()
+		if os.path.isdir(gcode):
+			self.jobqueue = {}
+			for filename in os.listdir(gcode):
+				name, ext = os.path.splitext(filename)
+				if ext != os.extsep + 'bin':
+					log('skipping %s' % filename)
+					continue
+				try:
+					#log('opening %s' % filename)
+					with open(os.path.join(gcode, filename), 'rb') as f:
+						f.seek(-8 * 8, os.SEEK_END)
+						self.jobqueue[name] = struct.unpack('=' + 'd' * 8, f.read())
+				except:
+					traceback.print_exc()
+					log('failed to open gcode file %s' % os.path.join(gcode, filename))
+			sortable_queue = [(q, self.jobqueue[q]) for q in self.jobqueue]
+			sortable_queue.sort()
+			self._broadcast(None, 'queue', sortable_queue)
+		if os.path.isdir(audio):
+			self.audioqueue = {}
+			for filename in os.listdir(audio):
+				name, ext = os.path.splitext(filename)
+				if ext != os.extsep + 'bin':
+					log('skipping %s' % filename)
+					continue
+				try:
+					#log('opening audio %s' % filename)
+					self.audioqueue[name] = os.stat(os.path.join(audio, filename)).st_size
+				except:
+					traceback.print_exc()
+					log('failed to stat audio file %s' % os.path.join(audio, filename))
+			sortable_queue = list(self.audioqueue.keys())
+			sortable_queue.sort()
+			self._broadcast(None, 'audioqueue', sortable_queue)
 	def __init__(self, allow_system): # {{{
 		self.initialized = False
 		self.connected = False
 		self.uuid = config['uuid']
-		self.user_interface = '{Dv23p(No Connection:){dv50p{dv50p{dv50p[0:*Controls:{Dh50%{Dv180p{Dv79p{dh261p(Job Control:)(Buttons:)}(Position:)}{Dh85%(XY Map:)(Z Map:)}}{Dv356p{Dv186p{Dv45p(Abort:)(Multipliers:)}(Temps:)}(Temp Graph:)}}Setup:[0:*Profile:(Profile Setup:)Hardware:(Hardware Setup:)Probe:(Probe Setup:)Globals:(Globals Setup:)Axes:(Axis Setup:)Motors:(Motor Setup:)Type:{Dv45p(Type Setup:){Dh50%(Cartesian Setup:){Dh50%(Delta Setup:)(Polar Setup:)}}}Extruder:(Extruder Setup:)Follower:(Follower Setup:)GPIO:(Gpio Setup:)Temps:(Temp Setup:)Pins:(Pin Setup:)]](Confirmation:)}(Message:)}(State:)}}'
+		# Start a block because the next line has an accidental end marker. {{{
+		self.user_interface = '{Dv2m(Blocker:){Dv2m(No Connection:){dv3m{dv3m{dv3m[0:*Controls:{Dh60%{Dv12m{Dv5m{dh11m(Job Control:)(Buttons:)}(Position:)}{Dh85%(XY Map:)(Z Map:)}}{Dv4m(Abort:){Dv6m(Multipliers:){Dv2m(Gpios:){Dv9m(Temps:)(Temp Graph:)}}}}}Setup:{Dv2m(Save Profile:)[0:*Profile:(Profile Setup:)Probe:(Probe Setup:)Globals:(Globals Setup:)Axes:(Axis Setup:)Motors:(Motor Setup:)Type:{Dv3m(Type Setup:){Dh50%(Cartesian Setup:){Dh50%(Delta Setup:)(Polar Setup:)}}}Extruder:(Extruder Setup:)Follower:(Follower Setup:)GPIO:(Gpio Setup:)Temps:(Temp Setup:)]}](Confirmation:)}(Message:)}(State:)}}}'
 		self.pin_names = []
 		self.machine = Driver()
 		self.allow_system = allow_system
@@ -233,9 +296,9 @@ class Machine: # {{{
 		self.probe_safe_dist = 10
 		self.num_probes = 1
 		self.unit_name = 'mm'
-		self.park_after_print = True
-		self.sleep_after_print = True
-		self.cool_after_print = True
+		self.park_after_job = True
+		self.sleep_after_job = True
+		self.cool_after_job = True
 		self.spi_setup = []
 		# Set up state.
 		self.spaces = [self.Space(self, i) for i in range(NUM_SPACES)]
@@ -297,61 +360,12 @@ class Machine: # {{{
 		# Fill job queue.
 		self.jobqueue = {}
 		self.audioqueue = {}
-		if self.uuid is not None:
-			spool = fhs.read_spool(self.uuid, dir = True, opened = False)
-			if spool is not None:
-				gcode = os.path.join(spool, 'gcode')
-				audio = os.path.join(spool, 'audio')
-				probe = fhs.read_spool(os.path.join(self.uuid, 'probe' + os.extsep + 'bin'), text = False)
-				if probe is not None:
-					try:
-						# Map = [[targetx, targety, x0, y0, w, h], [nx, ny], [[...], [...], ...]]
-						size = struct.calcsize('@ddddddddLLd')
-						targetx, targety, x0, y0, w, h, sina, cosa, nx, ny, self.targetangle = struct.unpack('@ddddddddLLd', probe.read(size))
-						self.gcode_angle = math.sin(self.targetangle), math.cos(self.targetangle)
-						sina, cosa = self.gcode_angle
-						limits = [targetx, targety, x0, y0, w, h]
-						nums = [nx, ny, self.targetangle]
-						if not (0 < nx < 1000 and 0 < ny < 1000):
-							raise ValueError('probe map too large; probably invalid')
-						probes = [[None for x in range(nx + 1)] for y in range(ny + 1)]
-						for y in range(ny + 1):
-							for x in range(nx + 1):
-								probes[y][x] = struct.unpack('@d', probe.read(struct.calcsize('@d')))[0]
-						self.probemap = [limits, nums, probes]
-					except:
-						log('Failed to load probe map')
-				if os.path.isdir(gcode):
-					for filename in os.listdir(gcode):
-						name, ext = os.path.splitext(filename)
-						if ext != os.extsep + 'bin':
-							log('skipping %s' % filename)
-							continue
-						try:
-							#log('opening %s' % filename)
-							with open(os.path.join(gcode, filename), 'rb') as f:
-								f.seek(-8 * 8, os.SEEK_END)
-								self.jobqueue[name] = struct.unpack('=' + 'd' * 8, f.read())
-						except:
-							traceback.print_exc()
-							log('failed to open gcode file %s' % os.path.join(gcode, filename))
-				if os.path.isdir(audio):
-					for filename in os.listdir(audio):
-						name, ext = os.path.splitext(filename)
-						if ext != os.extsep + 'bin':
-							log('skipping %s' % filename)
-							continue
-						try:
-							#log('opening audio %s' % filename)
-							self.audioqueue[name] = os.stat(os.path.join(audio, filename)).st_size
-						except:
-							traceback.print_exc()
-							log('failed to stat audio file %s' % os.path.join(audio, filename))
-			try:
-				self.load(update = False)
-			except:
-				log('Failed to import initial settings')
-				traceback.print_exc()
+		self._refresh_queue()
+		try:
+			self.load(update = False)
+		except:
+			log('Failed to import initial settings')
+			traceback.print_exc()
 		global show_own_debug
 		if show_own_debug is None:
 			show_own_debug = True
@@ -565,7 +579,7 @@ class Machine: # {{{
 				call_queue.append((self.park(cb = cb, abort = False)[1], (None,)))
 				continue
 			elif cmd == protocol.rcommand['FILE_DONE']:
-				call_queue.append((self._print_done, (True, 'completed')))
+				call_queue.append((self._job_done, (True, 'completed')))
 				continue
 			elif cmd == protocol.rcommand['PINNAME']:
 				if s >= len(self.pin_names):
@@ -752,7 +766,7 @@ class Machine: # {{{
 	def _globals_update(self, target = None): # {{{
 		if not self.initialized:
 			return
-		self._broadcast(target, 'globals_update', [self.name, self.profile, len(self.temps), len(self.gpios), self.user_interface, self.pin_names, self.led_pin, self.stop_pin, self.probe_pin, self.spiss_pin, self.probe_dist, self.probe_offset, self.probe_safe_dist, self.bed_id, self.fan_id, self.spindle_id, self.unit_name, self.timeout, self.feedrate, self.max_deviation, self.max_v, self.targetx, self.targety, self.targetangle, self.zoffset, self.store_adc, self.park_after_print, self.sleep_after_print, self.cool_after_print, self._mangle_spi(), self.temp_scale_min, self.temp_scale_max, self.probemap, self.connected, not self.paused and (None if self.gcode_map is None and not self.gcode_file else True)])
+		self._broadcast(target, 'globals_update', [self.name, self.profile, len(self.temps), len(self.gpios), self.user_interface, self.pin_names, self.led_pin, self.stop_pin, self.probe_pin, self.spiss_pin, self.probe_dist, self.probe_offset, self.probe_safe_dist, self.bed_id, self.fan_id, self.spindle_id, self.unit_name, self.timeout, self.feedrate, self.max_deviation, self.max_v, self.targetx, self.targety, self.targetangle, self.zoffset, self.store_adc, self.park_after_job, self.sleep_after_job, self.cool_after_job, self._mangle_spi(), self.temp_scale_min, self.temp_scale_max, self.probemap, self.connected, not self.paused and (None if self.gcode_map is None and not self.gcode_file else True)])
 	# }}}
 	def _space_update(self, which, target = None): # {{{
 		if not self.initialized:
@@ -785,7 +799,7 @@ class Machine: # {{{
 		self.gcode_map = None
 		self.gcode_fd = -1
 	# }}}
-	def _print_done(self, complete, reason): # {{{
+	def _job_done(self, complete, reason): # {{{
 		self._send_packet(struct.pack('=BBddBB', protocol.command['RUN_FILE'], 0, 0, 0, 0xff, 0))
 		if self.gcode_map is not None:
 			log(reason)
@@ -831,13 +845,13 @@ class Machine: # {{{
 		self._globals_update()
 	# }}}
 	def _finish_done(self): # {{{
-		if self.cool_after_print:
+		if self.cool_after_job:
 			for t in range(len(self.temps)):
 				self.settemp(t, float('nan'))
 		def maybe_sleep():
-			if self.sleep_after_print:
+			if self.sleep_after_job:
 				self.sleep()
-		if self.park_after_print:
+		if self.park_after_job:
 			self.park(cb = maybe_sleep)[1](None)
 		else:
 			maybe_sleep()
@@ -857,21 +871,23 @@ class Machine: # {{{
 		self.paused = False
 		self._globals_update()
 	# }}}
-	def _queue_add(self, f, name): # {{{
-		name = os.path.split(name)[1]
+	def _queue_add(self, filename, name): # {{{
+		name = os.path.splitext(os.path.split(name)[1])[0]
 		origname = name
 		i = 0
 		while name == '' or name in self.jobqueue:
 			name = '%s-%d' % (origname, i)
 			i += 1
-		bbox, errors = self._gcode_parse(f, name)
-		for e in errors:
-			log(e)
-		if bbox is None:
-			return errors
-		self.jobqueue[os.path.splitext(name)[0]] = bbox
-		self._broadcast(None, 'queue', [(q, self.jobqueue[q]) for q in self.jobqueue])
-		return errors
+		infilename = filename.encode('utf-8', 'replace')
+		outfiledir = fhs.write_spool(os.path.join(self.uuid, 'gcode'), dir = True)
+		if not os.path.isdir(outfiledir):
+			os.makedirs(outfiledir)
+		outfilename = os.path.join(outfiledir, name + os.path.extsep + 'bin').encode('utf-8', 'replace')
+		self._broadcast(None, 'blocked', 'Parsing g-code')
+		self._send_packet(struct.pack('=BH', protocol.command['PARSE_GCODE'], len(infilename)) + infilename + outfilename)
+		self._get_reply()
+		self._refresh_queue()
+		self._broadcast(None, 'blocked', None)
 	# }}}
 	def _audio_add(self, f, name): # {{{
 		name = os.path.splitext(os.path.split(name)[1])[0]
@@ -1327,7 +1343,7 @@ class Machine: # {{{
 			self.probing = False
 			if id is not None:
 				self._send(id, 'error', 'aborted')
-			#self._print_done(False, 'Probe aborted')
+			#self._job_done(False, 'Probe aborted')
 			return
 		self.probing = True
 		if not self.position_valid:
@@ -1461,7 +1477,7 @@ class Machine: # {{{
 			self.btemp = float('nan')
 		if abort:
 			self._unpause()
-			self._print_done(False, 'aborted by starting new print')
+			self._job_done(False, 'aborted by starting new job')
 		self.queue_info = None
 		# Disable all alarms.
 		for i in range(len(self.temps)):
@@ -1499,7 +1515,7 @@ class Machine: # {{{
 	# }}}
 	def _gcode_parse(self, src, name): # {{{
 		assert len(self.spaces) > 0
-		self._broadcast(None, 'blocked', 'parsing g-code')
+		self._broadcast(None, 'blocked', 'Parsing g-code')
 		errors = []
 		mode = None
 		message = None
@@ -1652,6 +1668,7 @@ class Machine: # {{{
 			current_extruder = 0
 			for lineno, origline in enumerate(src):
 				line = origline.strip()
+				origline = line
 				#log('parsing %s' % line)
 				# Get rid of line numbers and checksums.
 				if line.startswith('N'):
@@ -1683,7 +1700,7 @@ class Machine: # {{{
 					message = comment[4:].strip()
 				elif comment.startswith('SYSTEM:'):
 					if not re.match(self.allow_system, comment[7:]):
-						errors.append('Warning: system command %s is forbidden and will not be run' % comment[7:])
+						errors.append('%d:Warning: system command %s is forbidden and will not be run' % (lineno, comment[7:]))
 					add_record(protocol.parsed['SYSTEM'], [add_string(comment[7:])])
 					continue
 				if line == '':
@@ -1935,9 +1952,9 @@ class Machine: # {{{
 							add_record(protocol.parsed['SETPOS'], [e, 0])
 					elif cmd == ('M', 104):
 						if args['E'] >= len(self.temps):
-							errors.append('ignoring M104 for invalid temp %d' % args['E'])
+							errors.append('%d:ignoring M104 for invalid temp %d' % (lineno, args['E']))
 						elif 'S' not in args:
-							errors.append('ignoring M104 without S')
+							errors.append('%d:ignoring M104 without S' % lineno)
 						else:
 							add_record(protocol.parsed['SETTEMP'], [int(args['E']), args['S'] + C0])
 					elif cmd == ('M', 106):
@@ -1979,7 +1996,7 @@ class Machine: # {{{
 						bbox[t] = 0;
 			dst.write(struct.pack('=L' + 'd' * 8, len(strings), *(bbox + time_dist)))
 		self._broadcast(None, 'blocked', None)
-		return ret and ret + time_dist, errors
+		return ret and ret + time_dist, '\n'.join(errors)
 	# }}}
 	def _reset_extruders(self, axes): # {{{
 		for i, sp in enumerate(axes):
@@ -2244,6 +2261,8 @@ class Machine: # {{{
 		uuid = protocol.new_uuid(string = False)
 		self._send_packet(struct.pack('=B', protocol.command['SET_UUID']) + bytes(uuid))
 		self.uuid = protocol.new_uuid(uuid = uuid, string = True)
+		if not self.name:
+			self.name = self.uuid
 		return self.uuid
 	# }}}
 	def expert_die(self, reason): # {{{
@@ -2478,8 +2497,8 @@ class Machine: # {{{
 		self.pause(store = False)
 		for g, gpio in enumerate(self.gpios):
 			self.set_gpio(g, state = gpio.reset)
-		self._print_done(False, 'aborted by user')
-		# Sleep doesn't work as long as home_phase is non-None, so do it after _print_done.
+		self._job_done(False, 'aborted by user')
+		# Sleep doesn't work as long as home_phase is non-None, so do it after _job_done.
 		self.sleep(force = True);
 	# }}}
 	def pause(self, pausing = True, store = True, update = True): # {{{
@@ -2569,7 +2588,7 @@ class Machine: # {{{
 			return
 		# Abort only if it is requested, and the job is not paused.
 		if abort and self.queue_info is None:
-			self._print_done(False, 'aborted by homing')
+			self._job_done(False, 'aborted by homing')
 		self.home_phase = 0
 		self.home_id = id
 		self.home_return = None
@@ -2590,7 +2609,7 @@ class Machine: # {{{
 			return
 		#log('parking with cb %s' % repr(cb))
 		if abort and self.queue_info is None:
-			self._print_done(False, 'aborted by parking')
+			self._job_done(False, 'aborted by parking')
 		self.parking = True
 		if not self.position_valid:
 			#log('homing')
@@ -2710,15 +2729,15 @@ class Machine: # {{{
 		message += 'unit_name = %s\r\n' % self.unit_name
 		message += 'spi_setup = %s\r\n' % self._mangle_spi()
 		message += ''.join(['%s = %s\r\n' % (x, write_pin(getattr(self, x))) for x in ('led_pin', 'stop_pin', 'probe_pin', 'spiss_pin')])
-		message += ''.join(['%s = %d\r\n' % (x, getattr(self, x)) for x in ('bed_id', 'fan_id', 'spindle_id', 'park_after_print', 'sleep_after_print', 'cool_after_print', 'timeout')])
+		message += ''.join(['%s = %d\r\n' % (x, getattr(self, x)) for x in ('bed_id', 'fan_id', 'spindle_id', 'park_after_job', 'sleep_after_job', 'cool_after_job', 'timeout')])
 		message += ''.join(['%s = %f\r\n' % (x, getattr(self, x)) for x in ('probe_dist', 'probe_offset', 'probe_safe_dist', 'temp_scale_min', 'temp_scale_max', 'max_deviation', 'max_v')])
+		message += 'user_interface = %s\r\n' % self.user_interface
 		for i, s in enumerate(self.spaces):
 			message += s.export_settings()
 		for i, t in enumerate(self.temps):
 			message += t.export_settings()
 		for i, g in enumerate(self.gpios):
 			message += g.export_settings()
-		message += 'user_interface = %s\r\n' % self.user_interface	# Put this last, to keep the file readable.
 		return message
 	# }}}
 	def expert_import_settings(self, settings, filename = None, update = True): # {{{
@@ -2743,7 +2762,7 @@ class Machine: # {{{
 		globals_changed = True
 		changed = {'space': set(), 'temp': set(), 'gpio': set(), 'axis': set(), 'motor': set(), 'extruder': set(), 'delta': set(), 'follower': set()}
 		keys = {
-				'general': {'num_temps', 'num_gpios', 'user_interface', 'pin_names', 'led_pin', 'stop_pin', 'probe_pin', 'spiss_pin', 'probe_dist', 'probe_offset', 'probe_safe_dist', 'bed_id', 'fan_id', 'spindle_id', 'unit_name', 'timeout', 'temp_scale_min', 'temp_scale_max', 'park_after_print', 'sleep_after_print', 'cool_after_print', 'spi_setup', 'max_deviation', 'max_v'},
+				'general': {'num_temps', 'num_gpios', 'user_interface', 'pin_names', 'led_pin', 'stop_pin', 'probe_pin', 'spiss_pin', 'probe_dist', 'probe_offset', 'probe_safe_dist', 'bed_id', 'fan_id', 'spindle_id', 'unit_name', 'timeout', 'temp_scale_min', 'temp_scale_max', 'park_after_job', 'sleep_after_job', 'cool_after_job', 'spi_setup', 'max_deviation', 'max_v'},
 				'space': {'type', 'num_axes', 'delta_angle', 'polar_max_r'},
 				'temp': {'name', 'R0', 'R1', 'Rc', 'Tc', 'beta', 'heater_pin', 'fan_pin', 'thermistor_pin', 'fan_temp', 'fan_duty', 'heater_limit_l', 'heater_limit_h', 'fan_limit_l', 'fan_limit_h', 'hold_time'},
 				'gpio': {'name', 'pin', 'state', 'reset', 'duty'},
@@ -2954,7 +2973,7 @@ class Machine: # {{{
 			else:
 				if not success:
 					self.probe_pending = False
-					self._print_done(False, 'aborted by failed confirmation')
+					self._job_done(False, 'aborted by failed confirmation')
 				else:
 					if self.probe_pending and self._pin_valid(self.probe_pin):
 						self.probe_pending = False
@@ -2970,14 +2989,13 @@ class Machine: # {{{
 		with fhs.write_temp() as f:
 			f.write(data)
 			f.seek(0)
-			return self._queue_add(f, name)
+			return self._queue_add(f.filename, name)
 	# }}}
 	def queue_add_POST(self, filename, name): # {{{
 		'''Add g-code to queue using a POST request.
 		Note that this function can only be called using POST; not with the regular websockets system.
 		'''
-		with open(filename) as f:
-			return ', '.join(self._queue_add(f, name))
+		return self._queue_add(filename, name)
 	# }}}
 	def probe_add_POST(self, filename, name): # {{{
 		'''Set probe map using a POST request.
@@ -3007,7 +3025,7 @@ class Machine: # {{{
 	# }}}
 	@delayed
 	def queue_run(self, id, name, paused = False): # {{{
-		'''Run one or more new jobs.
+		'''Start a new job.
 		'''
 		if self.probing:
 			log('ignoring run request while probe is in progress')
@@ -3024,8 +3042,8 @@ class Machine: # {{{
 		self.job_id = id
 		self._start_job(paused)
 	# }}}
-	def get_print_state(self): # {{{
-		'''Return current print state.
+	def get_machine_state(self): # {{{
+		'''Return current machine state.
 		Return value is a tuple of a human readable string describing
 		the state, NaN or the elapsed time, NaN or the total time for
 		the current job.
@@ -3135,7 +3153,7 @@ class Machine: # {{{
 	def get_globals(self): # {{{
 		#log('getting globals')
 		ret = {'num_temps': len(self.temps), 'num_gpios': len(self.gpios)}
-		for key in ('name', 'user_interface', 'pin_names', 'uuid', 'queue_length', 'num_pins', 'led_pin', 'stop_pin', 'probe_pin', 'spiss_pin', 'probe_dist', 'probe_offset', 'probe_safe_dist', 'bed_id', 'fan_id', 'spindle_id', 'unit_name', 'timeout', 'feedrate', 'targetx', 'targety', 'targetangle', 'zoffset', 'store_adc', 'temp_scale_min', 'temp_scale_max', 'probemap', 'paused', 'park_after_print', 'sleep_after_print', 'cool_after_print', 'spi_setup', 'max_deviation', 'max_v'):
+		for key in ('name', 'user_interface', 'pin_names', 'uuid', 'queue_length', 'num_pins', 'led_pin', 'stop_pin', 'probe_pin', 'spiss_pin', 'probe_dist', 'probe_offset', 'probe_safe_dist', 'bed_id', 'fan_id', 'spindle_id', 'unit_name', 'timeout', 'feedrate', 'targetx', 'targety', 'targetangle', 'zoffset', 'store_adc', 'temp_scale_min', 'temp_scale_max', 'probemap', 'paused', 'park_after_job', 'sleep_after_job', 'cool_after_job', 'spi_setup', 'max_deviation', 'max_v'):
 			ret[key] = getattr(self, key)
 		return ret
 	# }}}
@@ -3160,7 +3178,7 @@ class Machine: # {{{
 			self.spi_setup = self._unmangle_spi(ka.pop('spi_setup'))
 			if self.spi_setup:
 				self._spi_send(self.spi_setup)
-		for key in ('led_pin', 'stop_pin', 'probe_pin', 'spiss_pin', 'bed_id', 'fan_id', 'spindle_id', 'park_after_print', 'sleep_after_print', 'cool_after_print', 'timeout'):
+		for key in ('led_pin', 'stop_pin', 'probe_pin', 'spiss_pin', 'bed_id', 'fan_id', 'spindle_id', 'park_after_job', 'sleep_after_job', 'cool_after_job', 'timeout'):
 			if key in ka:
 				setattr(self, key, int(ka.pop(key)))
 		for key in ('probe_dist', 'probe_offset', 'probe_safe_dist', 'feedrate', 'targetx', 'targety', 'targetangle', 'zoffset', 'temp_scale_min', 'temp_scale_max', 'max_deviation', 'max_v'):

@@ -192,23 +192,29 @@ class Server(websocketd.RPChttpd): # {{{
 			log('machine not found: %s' % machine)
 			self.reply(connection, 404)
 			return False
-		post = connection.post[1].pop('file')
-		def cb(success, ret):
-			self.reply(connection, 200 if success else 400, b'' if ret is None else ret.encode('utf-8'), 'text/plain;charset=utf-8')
-			os.unlink(post[0])
-			connection.socket.close()
-		if action == 'queue_add':
-			machines[machine].call('queue_add_POST', [connection.data['role'], post[0], post[1]], {}, cb)
-		elif action == 'probe_add':
-			machines[machine].call('probe_add_POST', [connection.data['role'], post[0], post[1]], {}, cb)
-		elif action == 'audio_add':
-			machines[machine].call('audio_add_POST', [connection.data['role'], post[0], post[1]], {}, cb)
-		elif action == 'import':
-			machines[machine].call('import_POST', [connection.data['role'], post[0], post[1]], {}, cb)
-		else:
-			os.unlink(post[0])
-			self.reply(connection, 400)
-			return False
+		# Count files, so we know when the connection should be closed.
+		# Use a list to make it accessible from the callback.
+		num = [len(connection.post[1]['file'])]
+		for post in connection.post[1].pop('file'):
+			def cb(success, ret, filename):
+				self.reply(connection, 200 if success else 400, b'' if ret is None else ret.encode('utf-8'), 'text/plain;charset=utf-8')
+				os.unlink(filename)
+				num[0] -= 1
+				if num[0] == 0:
+					connection.socket.close()
+			def cbwrap(filename):
+				'''This function makes sure that filename gets its own scope and is not changed by the for loop.'''
+				return lambda success, ret: cb(success, ret, filename)
+			if action == 'queue_add':
+				machines[machine].call('queue_add_POST', [connection.data['role'], post[0], post[1]], {}, cbwrap(post[0]))
+			elif action == 'probe_add':
+				machines[machine].call('probe_add_POST', [connection.data['role'], post[0], post[1]], {}, cbwrap(post[0]))
+			elif action == 'audio_add':
+				machines[machine].call('audio_add_POST', [connection.data['role'], post[0], post[1]], {}, cbwrap(post[0]))
+			elif action == 'import':
+				machines[machine].call('import_POST', [connection.data['role'], post[0], post[1]], {}, cbwrap(post[0]))
+			else:
+				cb(false, 'invalid POST action', post[0])
 		return True
 # }}}
 
@@ -301,7 +307,7 @@ class Connection: # {{{
 		filename = fhs.read_data(os.path.join('firmware', boards[board]['build.mcu'] + os.extsep + 'hex'), opened = False)
 		if filename is None:
 			raise NotImplementedError('Firmware is not available')
-		return ('avrdude', '-D', '-q', '-q', '-p', boards[board]['build.mcu'], '-C /etc/avrdude.conf', '-b', boards[board]['upload.speed'], '-c', boards[board]['upload.protocol'], '-P', port, '-U', 'flash:w:' + filename + ':i')
+		return ('avrdude', '-D', '-q', '-q', '-p', boards[board]['build.mcu'], '-C', '/etc/avrdude.conf', '-b', boards[board]['upload.speed'], '-c', boards[board]['upload.protocol'], '-P', port, '-U', 'flash:w:' + filename + ':i')
 	# }}}
 	def upload(self, port, board): # {{{
 		wake = (yield)
@@ -341,7 +347,7 @@ class Connection: # {{{
 		fl = fcntl.fcntl(process.stdout.fileno(), fcntl.F_GETFL)
 		fcntl.fcntl(process.stdout.fileno(), fcntl.F_SETFL, fl | os.O_NONBLOCK)
 		websocketd.add_read(process.stdout, output, error)
-		#broadcast(None, 'blocked', port, 'uploading firmware for %s' % board)
+		broadcast(None, 'uploading', port, 'uploading firmware for %s' % board)
 		#broadcast(None, 'message', port, '')
 		d = (yield)
 		try:
@@ -352,7 +358,7 @@ class Connection: # {{{
 			process.communicate()	# Clean up.
 		except:
 			pass
-		#broadcast(None, 'blocked', port, None)
+		broadcast(None, 'uploading', port, None)
 		#broadcast(None, 'message', port, '')
 		broadcast(None, 'port_state', port, 0)
 		ports[port] = None
@@ -501,7 +507,7 @@ def broadcast(target, name, *args): # {{{
 # }}}
 
 class Machine: # {{{
-	def __init__(self, port, process, detectport, run_id): # {{{
+	def __init__(self, port, process, detectport, run_id, send = True): # {{{
 		'''Create a new Machine object.
 		This can be called for several reasons:
 		- At startup, every saved machine is started.  In this case, port is None.
@@ -521,7 +527,7 @@ class Machine: # {{{
 		fl = fcntl.fcntl(process.stdout.fileno(), fcntl.F_GETFL)
 		fcntl.fcntl(process.stdout.fileno(), fcntl.F_SETFL, fl | os.O_NONBLOCK)
 		self.input_handle = websocketd.add_read(process.stdout, self.machine_input, self.machine_error)
-		def get_vars(success, vars):
+		def get_vars(success, vars, cb = None):
 			if not success:
 				log('failed to get vars')
 				if detectport is not None:
@@ -533,12 +539,21 @@ class Machine: # {{{
 				log('Driver started; closing server port')
 				detectport.close()
 			if self.uuid is None:
+				log('new uuid:' + repr(vars['uuid']))
 				self.uuid = vars['uuid']
 			else:
 				assert self.uuid == vars['uuid']
 			self.detecting = False
 			self.call('send_machine', ['admin', None], {}, lambda success, data: broadcast(None, 'port_state', port, 2))
-		self.call('get_globals', ('admin',), {}, get_vars)
+			if cb is not None:
+				cb()
+		if send:
+			self.call('get_globals', ('admin',), {}, get_vars)
+		else:
+			def finish(cb):
+				self.call('get_globals', ('admin',), {}, lambda success, vars: get_vars(success, vars, cb))
+				del self.finish
+			self.finish = finish
 	# }}}
 	def call(self, name, args, kargs, cb): # {{{
 		#log('calling {}'.format(repr((name, args, kargs))))
@@ -659,8 +674,8 @@ last_id = random.randrange(1 << 32)
 id_map = [0x40, 0xe1, 0xd2, 0x73, 0x74, 0xd5, 0xe6, 0x47, 0xf8, 0x59, 0x6a, 0xcb, 0xcc, 0x6d, 0x5e, 0xff]
 # }}}
 
-def print_done(port, completed, reason): # {{{
-	broadcast(None, 'printing', port.port, False)
+def job_done(port, completed, reason): # {{{
+	broadcast(None, 'running', port.port, False)
 	if config['done']:
 		cmd = config['done']
 		cmd = cmd.replace('[[STATE]]', 'completed' if completed else 'aborted').replace('[[REASON]]', reason)
@@ -671,7 +686,7 @@ def print_done(port, completed, reason): # {{{
 			if data:
 				log('Data from completion callback: %s' % repr(data))
 				return True
-			log('Callback for print completion done; return: %s' % repr(p.wait()))
+			log('Callback for job completion done; return: %s' % repr(p.wait()))
 			return False
 		def process_error():
 			log('Job completion process returned error.')
@@ -802,17 +817,21 @@ def detect(port): # {{{
 				log('accepting unknown machine on port %s' % port)
 				#log('machines: %s' % repr(tuple(machines.keys())))
 				process = subprocess.Popen((fhs.read_data('driver.py', opened = False), '--cdriver', fhs.read_data('franklin-cdriver', opened = False), '--uuid', uuid if uuid is not None else '', '--allow-system', config['allow-system']) + (('--system',) if fhs.is_system else ()) + (('--arc', 'False') if not config['arc'] else ()), stdin = subprocess.PIPE, stdout = subprocess.PIPE, close_fds = True)
-				new_machine = Machine(port, process, machine, run_id)
-				def finish(success, uuid):
-					assert success
-					ports[port] = uuid
-					machines[uuid] = new_machine
-					log('connecting new machine %s to port %s' % (uuid, port))
+				new_machine = Machine(port, process, machine, run_id, send = uuid is not None)
+				def finish():
+					log('finish detect %s' % repr(new_machine.uuid))
+					ports[port] = new_machine.uuid
+					machines[new_machine.uuid] = new_machine
+					log('connecting new machine %s to port %s' % (new_machine.uuid, port))
 					new_machine.call('connect', ['admin', port, [chr(x) for x in run_id]], {}, lambda success, ret: None)
 				if uuid is None:
-					new_machine.call('reset_uuid', ['admin'], {}, finish)
+					def prefinish(success, uuid):
+						assert success
+						new_machine.uuid = uuid
+						new_machine.finish(finish)
+					new_machine.call('reset_uuid', ['admin'], {}, prefinish)
 				else:
-					finish(True, uuid)
+					finish()
 			return False
 		def boot_machine_error():
 			log('error during machine detection on port %s.' % port)

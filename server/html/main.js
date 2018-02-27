@@ -25,12 +25,12 @@ var labels_element, machines_element;
 var selected_machine;
 var type2plural = {space: 'spaces', temp: 'temps', gpio: 'gpios', axis: 'axes', motor: 'motors'};
 var space_types = ['Cartesian', 'Delta', 'Polar', 'Extruder', 'Follower'];
-var new_tab;
+var new_tab, new_page;
 // }}}
 
 // General supporting functions. {{{
 var reading_temps = false;
-function timed_update() {
+function timed_update() { // {{{
 	if (reading_temps || selected_machine === null || selected_machine === undefined || machines[selected_machine].ui.disabling)
 		return;
 	reading_temps = true;
@@ -190,12 +190,13 @@ function timed_update() {
 		update_canvas_and_spans(ui);
 	};
 	read(null, 0);
-}
+} // }}}
 
 AddEvent('load', function() { // {{{
 	labels_element = document.getElementById('labels');
 	machines_element = document.getElementById('machines');
 	new_tab = document.getElementById('new_label');
+	new_page = document.getElementById('new_page');
 	selected_machine = null;
 	setup();
 	window.AddEvent('keypress', keypress);
@@ -365,28 +366,15 @@ function select_machine(ui) { // {{{
 	}
 	if (selected_machine !== null && selected_machine !== undefined) {
 		new_tab.RemoveClass('active');
+		new_page.AddClass('hidden');
 		update_state(ui, get_value(ui, [null, 'status']));
 	}
 	else {
 		new_tab.AddClass('active');
+		new_page.RemoveClass('hidden');
 		update_state(ui, null);
 	}
 } // }}}
-
-function upload_buttons(port, ul, buttons) { // {{{
-	for (var b = 0; b < buttons.length; ++b) {
-		var li = ul.AddElement('li');
-		// Add the upload button.
-		var button = li.AddElement('button', 'upload');
-		button.type = 'button';
-		button.target = buttons[b][0];
-		button.onclick = function() {
-			rpc.call('upload', [port, this.target], {}, function(ret) { alert('upload done: ' + ret);});
-		};
-		button.AddText(buttons[b][1]);
-	}
-}
-// }}}
 
 function floatkey(event, element) { // {{{
 	if (event.ctrlKey || event.altKey)
@@ -498,8 +486,10 @@ function toggle_uiconfig(ui) { // {{{
 		set_value(ui, [null, 'user_interface'], ui.bin.serialize());
 } // }}}
 
-function update_firmwares(ports, firmwares) { // {{{
+function port_changed() { // {{{
+	var ports = document.getElementById('ports');
 	var port = ports.options[ports.selectedIndex].value;
+	var firmwares = document.getElementById('firmwares');
 	firmwares.ClearAll();
 	for (var o = 0; o < all_firmwares[port].length; ++o)
 		firmwares.AddElement('option').AddText(all_firmwares[port][o][1]).value = all_firmwares[port][o][0];
@@ -511,7 +501,9 @@ function detect(ports) { // {{{
 } // }}}
 
 function upload(ports, firmwares) { // {{{
+	var ports = document.getElementById('ports');
 	var port = ports.options[ports.selectedIndex].value;
+	var firmwares = document.getElementById('firmwares');
 	var firmware = firmwares.options[firmwares.selectedIndex].value;
 	rpc.call('upload', [port, firmware], {}, function(ret) { alert('upload done: ' + ret);});
 } // }}}
@@ -584,21 +576,21 @@ function audio_del(ui, select) { // {{{
 
 // Non-update events. {{{
 function connect(ui, connected) { // {{{
-	// TODO
+	if (ui)
+		ui.bin.update();
+	if (connected)
+		select_machine(ui);
 } // }}}
 
 function autodetect() { // {{{
 } // }}}
 
-function new_port(ui, port) { // {{{
-	for (var p in machines) {
-		var ports = get_elements(machines[p].ui, [null, 'ports']);
-		for (var i = 0; i < ports.length; ++i) {
-			ports[i].ClearAll();
-			var new_port = ports[i].AddElement('option').AddText(port);
-			new_port.value = port;
-		}
-	}
+function new_port(dummy, port) { // {{{
+	var ports = document.getElementById('ports');
+	var new_port = ports.AddElement('option').AddText(port);
+	new_port.value = port;
+	if (ports.options.length == 1)
+		port_changed();
 } // }}}
 
 function disable_buttons(state) { // {{{
@@ -655,30 +647,20 @@ function new_machine(uuid) { // {{{
 	machines[uuid].label.AddClass('notconnected');
 	machines[uuid].ui.AddClass('notconnected');
 	globals_update(uuid, false);
-	var ports_button = get_elements(machines[uuid].ui, [null, 'ports']);
-	for (var i = 0; i < ports_button.length; ++i) {
-		ports_button[i].ClearAll();
-		for (var port = 0; port < all_ports.length; ++port) {
-			var new_port = ports_button[i].AddElement('option').AddText(all_ports[port]);
-			new_port.value = all_ports[port];
-			for (var o = 0; o < all_firmwares[new_port.value].length; ++o) {
-				machines[uuid].ui.firmwares.AddElement('option').AddText(all_firmwares[new_port.value][o][1]).value = all_firmwares[new_port.value][o][0];
-			}
-		}
-	}
 	if (selected_machine === null)
 		select_machine(p);
 } // }}}
 
-function blocked(uuid, reason) { // {{{
-	var e = get_elements(machines[uuid].ui, [null, 'block1']);
-	for (var i = 0; i < e.length; ++i) {
-		if (reason)
-			e[i].ClearAll().AddText(reason).RemoveClass('hidden');
-		else
-			e[i].AddClass('hidden');
-	}
-	machines[uuid].ui.bin.update();	// Hide interface parts if applicable.
+function blocked(uuid, message) { // {{{
+	machines[uuid].ui.bin.update();
+} // }}}
+
+function uploading(dummy, port, message) { // {{{
+	var e = document.getElementById('uploading');
+	if (message)
+		e.ClearAll().AddText(message).RemoveClass('hidden');
+	else
+		e.AddClass('hidden');
 } // }}}
 
 function message(uuid, msg) { // {{{
@@ -708,30 +690,33 @@ function ask_confirmation(uuid, id, message) { // {{{
 	machines[uuid].ui.bin.update();
 } // }}}
 
+function update_queue(ui, element) { // {{{
+	var old = get_queue(ui, element);
+	var q = [];
+	for (var i = 0; i < element.options.length; ++i)
+		q.push(element.options[i].value);
+	element.ClearAll();
+	for (var i = 0; i < ui.machine.queue.length; ++i) {
+		var item = ui.machine.queue[i];
+		var o = element.AddElement('option');
+		o.AddText(item[0] + ' - ' + display_time(item[1][6] + item[1][7] / ui.machine.max_v));
+		o.value = item[0];
+		if (item[0] == old)
+			o.selected = true;
+	}
+	outer: for (var i = 0; i < element.options.length; ++i) {
+		for (var k = 0; k < q.length; ++k) {
+			if (element.options[i].value == q[k])
+				continue outer;
+		}
+		element.options[i].selected = true;
+	}
+} // }}}
+
 function queue(uuid) { // {{{
 	var e = get_elements(machines[uuid].ui, [null, 'queue']);
-	for (var j = 0; j < e.length; ++j) {
-		var old = get_queue(machines[uuid].ui, e[j]);
-		var q = [];
-		for (var i = 0; i < e[j].options.length; ++i)
-			q.push(e[j].options[i].value);
-		e[j].ClearAll();
-		for (var i = 0; i < machines[uuid].queue.length; ++i) {
-			var item = machines[uuid].queue[i];
-			var o = e[j].AddElement('option');
-			o.AddText(item[0] + ' - ' + display_time(item[1][6] + item[1][7] / machines[uuid].max_v));
-			o.value = item[0];
-			if (item[0] == old)
-				o.selected = true;
-		}
-		outer: for (var i = 0; i < e[j].options.length; ++i) {
-			for (var k = 0; k < q.length; ++k) {
-				if (e[j].options[i].value == q[k])
-					continue outer;
-			}
-			e[j].options[i].selected = true;
-		}
-	}
+	for (var j = 0; j < e.length; ++j)
+		update_queue(machines[uuid].ui, e[j]);
 	start_move(machines[uuid].ui);
 } // }}}
 
@@ -772,13 +757,19 @@ function audioqueue(uuid) { // {{{
 // }}}
 
 // Update events(from server). {{{
-function globals_update(uuid, ui_configure) { // {{{
+function globals_update(uuid, ui_configure, nums_changed) { // {{{
 	var p = machines[uuid].ui;
+	if (p.updating_globals)
+		return;
+	p.updating_globals = true;
 	if (ui_configure && p.bin && !p.bin.configuring) {
 		p.bin.destroy();
 		var content = ui_build(machines[uuid].user_interface, p.bin);
-		if (content != null)
+		if (content != null) {
 			p.bin.set_content(content);
+			machines[uuid].ui_update = false;
+			//console.info(machines[uuid].user_interface);
+		}
 	}
 	var e = get_elements(p, [null, 'uuid']);
 	for (var i = 0; i < e.length; ++i)
@@ -817,9 +808,9 @@ function globals_update(uuid, ui_configure) { // {{{
 	update_float(p, [null, 'targetangle']);
 	update_float(p, [null, 'zoffset']);
 	update_checkbox(p, [null, 'store_adc']);
-	update_checkbox(p, [null, 'park_after_print']);
-	update_checkbox(p, [null, 'sleep_after_print']);
-	update_checkbox(p, [null, 'cool_after_print']);
+	update_checkbox(p, [null, 'park_after_job']);
+	update_checkbox(p, [null, 'sleep_after_job']);
+	update_checkbox(p, [null, 'cool_after_job']);
 	update_str(p, [null, 'spi_setup']);
 	update_float(p, [null, 'temp_scale_min']);
 	update_float(p, [null, 'temp_scale_max']);
@@ -910,9 +901,14 @@ function globals_update(uuid, ui_configure) { // {{{
 	for (var i = 0; i < p.machine.gpios.length; ++i)
 		gpio_update(p.machine.uuid, i);
 	update_canvas_and_spans(p);
+	if (!ui_configure && nums_changed && p.bin !== undefined) {
+		console.info('nums changed in globals');
+		p.bin.update();
+	}
+	p.updating_globals = false;
 } // }}}
 
-function space_update(uuid, index) { // {{{
+function space_update(uuid, index, nums_changed) { // {{{
 	var p = machines[uuid].ui;
 	set_name(p, 'space', index, 0, p.machine.spaces[index].name);
 	if (index == 0) {
@@ -1030,6 +1026,10 @@ function space_update(uuid, index) { // {{{
 	p.hidetypes = newhidetypes;
 	update_table_visibility(p);
 	update_canvas_and_spans(p);
+	if (nums_changed && p.bin !== undefined) {
+		console.info('nums changed in space');
+		p.bin.update();
+	}
 } // }}}
 
 function temp_update(uuid, index) { // {{{
@@ -1084,8 +1084,9 @@ function update_table_visibility(ui) { // {{{
 	for (var t = 0; t < ui.tables.length; ++t) {
 		var show = false;
 		// Start at 1: skip title row.
-		for (var c = 1; c < ui.tables[t].children.length; ++c) {
-			if (!ui.tables[t].children[c].HaveClass('hidden')) {
+		for (var c = 1; c < ui.tables[t].childNodes.length; ++c) {
+			var node = ui.tables[t].childNodes[c];
+			if (node.className !== undefined && !node.HaveClass('hidden')) {
 				show = true;
 				break;
 			}
@@ -1184,17 +1185,17 @@ function update_profiles(ui) { // {{{
 function update_state(ui, state, time) { // {{{
 	var c = document.getElementById('container');
 	var pre;
-	c.RemoveClass('idle printing paused');
+	c.RemoveClass('idle running paused');
 	if (state === null) {
 		c.AddClass('idle');
 		pre = '';
 	}
 	else if (state) {
-		c.AddClass('printing');
+		c.AddClass('running');
 		if (time !== undefined)
 			pre = '(' + time + ') ';
 		else
-			pre = '(printing) ';
+			pre = '(running) ';
 	}
 	else {
 		c.AddClass('paused');
@@ -1211,6 +1212,13 @@ function pinrange(ui, type, element, initial_selected) { // {{{
 	ui.pinranges.push(pins);
 	pins.update = function(selected) {
 		// This is called when the pin names (may) have changed.
+		// Because it is slow, first detect if there was a change, and if not, do nothing.
+		// Conversion to a string could theoretically give a false positive, but that is not a practical problem.
+		var new_names = String(ui.machine.pin_names);
+		if (new_names == this.pin_names)
+			return;
+		this.pin_names = new_names;
+		// First find the currently selected pin name, to restore selection later.
 		if (selected === undefined) {
 			selected = element.selectedOptions[0];
 			if (selected)
@@ -1453,7 +1461,8 @@ function set_file(ui, id, element, action) { // {{{
 	var fd = new FormData();
 	fd.append('machine', ui.machine.uuid);
 	fd.append('action', action);
-	fd.append('file', element.files[0]);
+	for (var f = 0; f < element.files.length; ++f)
+		fd.append('file', element.files[f]);
 	post.open('POST', String(document.location), true);
 	post.AddEvent('readystatechange', function() {
 		if (this.readyState != this.DONE)
@@ -1478,6 +1487,11 @@ function fill(s) { // {{{
 function display_time(t) { // {{{
 	if (isNaN(t))
 		return '-';
+	var pre = '';
+	if (t < 0) {
+		pre = '-';
+		t = -t;
+	}
 	var s = Math.floor(t);
 	var m = Math.floor(s / 60);
 	var h = Math.floor(m / 60);
@@ -1486,12 +1500,12 @@ function display_time(t) { // {{{
 	m -= h * 60;
 	h -= d * 24;
 	if (d != 0)
-		return d.toFixed(0) + 'd ' + fill(h) + ':' + fill(m) + ':' + fill(s);
+		return pre + d.toFixed(0) + 'd ' + fill(h) + ':' + fill(m) + ':' + fill(s);
 	if (h != 0)
-		return h.toFixed(0) + ':' + fill(m) + ':' + fill(s);
+		return pre + h.toFixed(0) + ':' + fill(m) + ':' + fill(s);
 	if (m != 0)
-		return m.toFixed(0) + ':' + fill(s);
-	return s.toFixed(0) + 's';
+		return pre + m.toFixed(0) + ':' + fill(s);
+	return pre + s.toFixed(0) + 's';
 }
 // }}}
 
@@ -1516,10 +1530,10 @@ function update_canvas_and_spans(ui, space) { // {{{
 		});
 		return;
 	}
-	ui.machine.call('get_print_state', [], {}, function(state) {
+	ui.machine.call('get_machine_state', [], {}, function(state) {
 		if (!machines[ui.machine.uuid])
 			return;
-		var e = get_elements(ui, [null, 'printstate']);
+		var e = get_elements(ui, [null, 'machinestate']);
 		if (isNaN(state[1])) {
 			for (var i = 0; i < e.length; ++i)
 				e[i].ClearAll().AddText('State: ' + state[0]);

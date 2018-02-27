@@ -1,6 +1,7 @@
 /* templates.js - widgets for machine components for Franklin
  * vim: set foldmethod=marker :
  * Copyright 2014 Michigan Technological University
+ * Copyright 2018 Bas Wijnen <wijnen@debian.org>
  * Author: Bas Wijnen <wijnen@debian.org>
  *
  * This program is free software: you can redistribute it and/or modify
@@ -117,9 +118,10 @@ function Float(ui, obj, digits, factor, className, set) { // {{{
 	return [input, span];
 } // }}}
 
-function File(ui, obj, action, buttontext, types, cb) { // {{{
+function File(ui, obj, action, buttontext, types, multiple, cb) { // {{{
 	var input = Create('input');
 	input.type = 'file';
+	input.multiple = multiple ? true : false;
 	input.accept = types;
 	input.AddClass(make_id(ui, obj));
 	var button = Create('button', 'button').AddText(buttontext);
@@ -215,10 +217,6 @@ function Follower(ui, space, motor) {
 		f[i] = div;
 	}
 	return make_tablerow(ui, motor_name(ui, space, motor), f, ['rowtitle2'], undefined, TYPE_FOLLOWER, space);
-}
-
-function Cartesian(ui, num) {
-	return make_tablerow(ui, space_name(ui, num), [Float(ui, [['space', num], 'num_axes'], 0, 1)], ['rowtitle1'], undefined, [TYPE_CARTESIAN, TYPE_EXTRUDER, TYPE_FOLLOWER], num);
 }
 
 function Delta(ui, space, motor) {
@@ -379,10 +377,11 @@ function JobControl(desc, pos, top) { // {{{
 	ret.AddElement('button', 'queue1').AddEvent('click', function() { queue_del(ui, select); }).AddText('×').type = 'button';
 	select = ret.AddElement('div', 'jobs').AddElement('select').AddEvent('change', function() { start_move(ui); });
 	select.AddClass(make_id(ui, [null, 'queue']));
+	update_queue(ui, select);
 	e = ret.AddElement('div', 'jobbuttons');
-	e.Add(File(ui, [null, 'queue_add', 'queue_add'], 'queue_add', 'Add', '.gcode,.ngc,application/x-gcode'));
+	e.Add(File(ui, [null, 'queue_add', 'queue_add'], 'queue_add', 'Add', '.gcode,.ngc,application/x-gcode', true));
 	e.AddElement('br', 'benjamin');
-	e.Add(File(ui, [null, 'audio_add', 'audio_add'], 'audio_add', 'Add Audio', 'audio/x-wav'), 'benjamin');
+	e.Add(File(ui, [null, 'audio_add', 'audio_add'], 'audio_add', 'Add Audio', 'audio/x-wav', true), 'benjamin');
 	e.AddElement('br', 'benjamin');
 	var b = e.AddElement('button', 'benjamin').AddText('×').AddEvent('click', function() { audio_del(ui); });
 	b.type = 'button';
@@ -610,13 +609,12 @@ function Gpios(desc, pos, top) { // {{{
 function state(desc, pos, top) { // {{{
 	var ui = top.data;
 	var ret = Create('div', 'message');
-	ret.AddClass(make_id(ui, [null, 'printstate']));
+	ret.AddClass(make_id(ui, [null, 'machinestate']));
 	ret.update = function() {
 		this.hide(!ui.machine.connected);
 	};
 	return [ret, pos];
 } // }}}
-
 function message(desc, pos, top) { // {{{
 	var ui = top.data;
 	var ret = Create('div', 'message');
@@ -626,7 +624,15 @@ function message(desc, pos, top) { // {{{
 	};
 	return [ret, pos];
 } // }}}
-
+function blocker_bar(desc, pos, top) { // {{{
+	var ui = top.data;
+	var ret = Create('h2');
+	ret.update = function() {
+		this.ClearAll().AddText(ui.machine.blocked);
+		this.hide(!ui.machine.blocked);
+	};
+	return [ret, pos];
+} // }}}
 function noconnect_bar(desc, pos, top) { // {{{
 	var ui = top.data;
 	var ret = Create('h2').AddText('This machine is not connected');
@@ -635,7 +641,6 @@ function noconnect_bar(desc, pos, top) { // {{{
 	};
 	return [ret, pos];
 } // }}}
-
 function confirmation(desc, pos, top) { // {{{
 	var ui = top.data;
 	var self = Create('div', 'message').AddClass(make_id(ui, [null, 'confirm']));
@@ -665,7 +670,15 @@ function confirmation(desc, pos, top) { // {{{
 	};
 	return [self, pos];
 } // }}}
-
+function save_profile(desc, pos, top) { // {{{
+	var ui = top.data;
+	var ret = Create('div', 'setup expert');
+	b = ret.AddElement('button').AddText('Save Current Profile').AddEvent('click', function() {
+		ui.machine.call('save', [''], {});
+	});
+	b.type = 'button';
+	return [ret, pos];
+} // }}}
 function setup_profile(desc, pos, top) { // {{{
 	var ui = top.data;
 	var ret = Create('div', 'setup expert');
@@ -674,6 +687,13 @@ function setup_profile(desc, pos, top) { // {{{
 	ret.uuid.AddClass(make_id(ui, [null, 'uuid']));
 	var e = ret.AddElement('div', 'admin').AddText('Machine name:');
 	e.Add(Str(ui, [null, 'name']));
+	var connected = ret.AddElement('div', 'connected');
+	var disable = connected.AddElement('div').AddElement('button').AddText('Disable Machine');
+	disable.type = 'button';
+	disable.AddEvent('click', function() { ui.machine.disabling = true; rpc.call('disable', [ui.machine.uuid], {}); });
+	var remove = ret.AddElement('div', 'admin').AddElement('button').AddText('Remove Machine');
+	remove.type = 'button';
+	remove.AddEvent('click', function() { if (confirm('Do you really want to permanently remove all data about ' + ui.machine.name + '?')) { ui.machine.disabling = true; rpc.call('remove_machine', [ui.machine.uuid], {}); }});
 	// Save and restore. {{{
 	e = ret.AddElement('div', 'admin');
 	e.AddText('Profile');
@@ -706,7 +726,6 @@ function setup_profile(desc, pos, top) { // {{{
 	// }}}
 	return [ret, pos];
 } // }}}
-
 function setup_probe(desc, pos, top) { // {{{
 	var ui = top.data;
 	var ret = Create('div', 'setup expert');
@@ -720,51 +739,6 @@ function setup_probe(desc, pos, top) { // {{{
 	e.AddText(' ').Add(add_name(ui, 'unit', 0, 0));
 	return [ret, pos];
 } // }}}
-
-function setup_hardware(desc, pos, top) { // {{{
-	var ui = top.data;
-	var ret = Create('div', 'setup expert');
-	var notconnected = ret.AddElement('div', 'notconnected');
-	// Blocker bar. {{{
-	ret.AddClass(make_id(ui, [null, 'container']));
-	var blocker = ret.AddElement('div', 'hidden blocker');
-	blocker.AddClass(make_id(ui, [null, 'block1']));
-	// }}}
-	var connected = ret.AddElement('div', 'connected');
-	var disable = connected.AddElement('div').AddElement('button').AddText('Disable Machine');
-	disable.type = 'button';
-	disable.AddEvent('click', function() { ui.machine.disabling = true; rpc.call('disable', [ui.machine.uuid], {}); });
-	var remove = ret.AddElement('div', 'admin').AddElement('button').AddText('Remove Machine');
-	remove.type = 'button';
-	remove.AddEvent('click', function() { if (confirm('Do you really want to permanently remove all data about ' + ui.machine.name + '?')) { ui.machine.disabling = true; rpc.call('remove_machine', [ui.machine.uuid], {}); }});
-	var ports = notconnected.AddElement('select');
-	ports.AddClass(make_id(ui, [null, 'ports']));
-	ports.AddEvent('changed', function() { update_firmwares(ports, ui.firmwares); });
-	var b = notconnected.AddElement('button').AddText('Detect');
-	b.type = 'button';
-	b.AddEvent('click', function() { detect(ports); });
-	ui.firmwares = notconnected.AddElement('select');
-	b = notconnected.AddElement('button').AddText('Upload');
-	b.type = 'button';
-	b.AddEvent('click', function() { upload(ports, ui.firmwares); });
-	e = ret.AddElement('div').AddText('Temps:').Add(Float(ui, [null, 'num_temps'], 0));
-	e = ret.AddElement('div').AddText('Gpios:').Add(Float(ui, [null, 'num_gpios'], 0));
-	e = ret.AddElement('div').AddText('Temp Scale Minimum:');
-	e.Add(Float(ui, [null, 'temp_scale_min'], 0, 1));
-	e.AddText('°C');
-	e = ret.AddElement('div').AddText('Temp Scale Maximum:');
-	e.Add(Float(ui, [null, 'temp_scale_max'], 0, 1));
-	e.AddText('°C');
-	e = ret.AddElement('div').AddText('Max Deviation:');
-	e.Add(Float(ui, [null, 'max_deviation'], 2, 1));
-	e.AddText(' ').Add(add_name(ui, 'unit', 0, 0));
-	e = ret.AddElement('div').AddText('Max v');
-	e.Add(Float(ui, [null, 'max_v'], 2, 1));
-	e.AddText(' ').Add(add_name(ui, 'unit', 0, 0));
-	e.AddText('/s');
-	return [ret, pos];
-} // }}}
-
 function setup_type(desc, pos, top) { // {{{
 	var ui = top.data;
 	var ret = Create('div', 'setup expert').AddText('Machine Type:');
@@ -776,7 +750,6 @@ function setup_type(desc, pos, top) { // {{{
 	ret.AddElement('span').AddClass(make_id(ui, [['space', 0], 'type']));
 	return [ret, pos];
 } // }}}
-
 function setup_globals(desc, pos, top) { // {{{
 	var ui = top.data;
 	var ret = Create('div', 'setup expert');
@@ -785,31 +758,36 @@ function setup_globals(desc, pos, top) { // {{{
 	e.AddText(' min');
 	e = ret.AddElement('div').AddText('After Job Completion:');
 	var l = e.AddElement('label');
-	l.Add(Checkbox(ui, [null, 'park_after_print']));
+	l.Add(Checkbox(ui, [null, 'park_after_job']));
 	l.AddText('Park');
 	l = e.AddElement('label');
-	l.Add(Checkbox(ui, [null, 'sleep_after_print']));
+	l.Add(Checkbox(ui, [null, 'sleep_after_job']));
 	l.AddText('Sleep');
 	l = e.AddElement('label');
-	l.Add(Checkbox(ui, [null, 'cool_after_print']));
+	l.Add(Checkbox(ui, [null, 'cool_after_job']));
 	l.AddText('Cool');
 	e = ret.AddElement('div').AddText('SPI setup:');
 	e.Add(Str(ui, [null, 'spi_setup']));
+	e = ret.AddElement('div').AddText('Max Deviation:');
+	e.Add(Float(ui, [null, 'max_deviation'], 2, 1));
+	e.AddText(' ').Add(add_name(ui, 'unit', 0, 0));
+	e = ret.AddElement('div').AddText('Max v');
+	e.Add(Float(ui, [null, 'max_v'], 2, 1));
+	e.AddText(' ').Add(add_name(ui, 'unit', 0, 0));
+	e.AddText('/s');
+	var pins = ret.Add(make_table(ui));
+	// Add dummy first child instead of a title row.
+	pins.Add(document.createComment(''));
+	pins.Add(Pin(ui, 'LED', [null, 'led_pin'], 2));
+	pins.Add(Pin(ui, 'Stop', [null, 'stop_pin'], 4));
+	pins.Add(Pin(ui, 'Probe', [null, 'probe_pin'], 4));
+	pins.Add(Pin(ui, 'SPI SS', [null, 'spiss_pin'], 2));
 	return [ret, pos];
 } // }}}
 function setup_cartesian(desc, pos, top) { // {{{
 	var ui = top.data;
 	var ret = Create('div', 'setup expert');
-	ret.Add([make_table(ui).AddMultipleTitles([
-		'Cartesian/Other',
-		'Number of Axes'
-	], [
-		'htitle1',
-		'title1'
-	], [
-		null,
-		'Number of axes'
-	]).AddMultiple(ui, 'space', Cartesian, false)]);
+	ret.AddElement('div').AddText('Number of axes:').Add(Float(ui, [['space', 0], 'num_axes'], 0));
 	return [ret, pos];
 } // }}}
 function setup_axis(desc, pos, top) { // {{{
@@ -845,6 +823,7 @@ function setup_axis(desc, pos, top) { // {{{
 function setup_motor(desc, pos, top) { // {{{
 	var ui = top.data;
 	var ret = Create('div', 'setup expert');
+	ret.update = function() { this.hide(ui.machine.spaces[0].motor.length + ui.machine.spaces[1].motor.length + ui.machine.spaces[2].motor.length == 0); };
 	ret.Add([make_table(ui).AddMultipleTitles([
 		'Motor Settings',
 		UnitTitle(ui, 'Coupling', null, 'steps/'),
@@ -867,6 +846,10 @@ function setup_motor(desc, pos, top) { // {{{
 		'Maximum speed of the motor.',
 		'Maximum acceleration of the motor.  4000 is a normal value.'
 	]).AddMultiple(ui, 'motor', Motor)]);
+	var pins = ret.Add(make_table(ui));
+	// Add dummy first child instead of a title row.
+	pins.Add(document.createComment(''));
+	pins.AddMultiple(ui, 'motor', Pins_space, false);
 	return [ret, pos];
 } // }}}
 function setup_delta(desc, pos, top) { // {{{
@@ -923,7 +906,7 @@ function setup_polar(desc, pos, top) { // {{{
 function setup_extruder(desc, pos, top) { // {{{
 	var ui = top.data;
 	var ret = Create('div', 'setup expert');
-	ret.update = function() { this.hide(ui.machine.spaces[1].axis.length == 0); };
+	ret.AddElement('div').AddText('Number of extruders:').Add(Float(ui, [['space', 1], 'num_axes'], 0));
 	ret.Add([make_table(ui).AddMultipleTitles([
 		'Extruder',
 		'Offset X',
@@ -945,7 +928,7 @@ function setup_extruder(desc, pos, top) { // {{{
 function setup_follower(desc, pos, top) { // {{{
 	var ui = top.data;
 	var ret = Create('div', 'setup expert');
-	ret.update = function() { this.hide(ui.machine.spaces[2].axis.length == 0); };
+	ret.AddElement('div').AddText('Number of Followers:').Add(Float(ui, [['space', 2], 'num_axes'], 0));
 	ret.Add([make_table(ui).AddMultipleTitles([
 		'Follower',
 		'Space',
@@ -965,6 +948,7 @@ function setup_follower(desc, pos, top) { // {{{
 function setup_temp(desc, pos, top) { // {{{
 	var ui = top.data;
 	var ret = Create('div', 'setup expert');
+	ret.AddElement('div').AddText('Number of Temps:').Add(Float(ui, [null, 'num_temps'], 0));
 	ret.Add([make_table(ui).AddMultipleTitles([
 		'Temp Settings',
 		'Name',
@@ -1025,11 +1009,22 @@ function setup_temp(desc, pos, top) { // {{{
 		"Temperature dependence of the thermistor.  Normally around 4000.  It can be found in the thermistor's data sheet.  Or, if NaN, the value of this sensor is ax+b with x the measured ADC value.",
 		'Minimum time to keep the heater and fan pins at their values after a change.'
 	]).AddMultiple(ui, 'temp', Temp_hardware)]);
+	var e = ret.AddElement('div').AddText('Temp Scale Minimum:');
+	e.Add(Float(ui, [null, 'temp_scale_min'], 0, 1));
+	e.AddText('°C');
+	e = ret.AddElement('div').AddText('Temp Scale Maximum:');
+	e.Add(Float(ui, [null, 'temp_scale_max'], 0, 1));
+	e.AddText('°C');
+	var pins = ret.Add(make_table(ui));
+	// Add dummy first child instead of a title row.
+	pins.Add(document.createComment(''));
+	pins.AddMultiple(ui, 'temp', Pins_temp, false);
 	return [ret, pos];
 } // }}}
 function setup_gpio(desc, pos, top) { // {{{
 	var ui = top.data;
 	var ret = Create('div', 'setup expert');
+	ret.AddElement('div').AddText('Number of Gpios:').Add(Float(ui, [null, 'num_gpios'], 0));
 	ret.Add([make_table(ui).AddMultipleTitles([
 		'Gpio',
 		'Name',
@@ -1052,19 +1047,9 @@ function setup_gpio(desc, pos, top) { // {{{
 		'Whether this Gpio is the fan pin, used by G-code commands M106 and M107.',
 		'Whether this Gpio is the spindle pin, used by G-code commands M3, M4 and M5.'
 	]).AddMultiple(ui, 'gpio', Gpio)]);
-	return [ret, pos];
-} // }}}
-function setup_pins(desc, pos, top) { // {{{
-	var ui = top.data;
-	var ret = Create('div', 'setup expert');
 	var pins = ret.Add(make_table(ui));
-	var globalpins = pins.AddElement('tbody');
-	globalpins.Add(Pin(ui, 'LED', [null, 'led_pin'], 2));
-	globalpins.Add(Pin(ui, 'Stop', [null, 'stop_pin'], 4));
-	globalpins.Add(Pin(ui, 'Probe', [null, 'probe_pin'], 4));
-	globalpins.Add(Pin(ui, 'SPI SS', [null, 'spiss_pin'], 2));
-	pins.AddMultiple(ui, 'motor', Pins_space, false);
-	pins.AddMultiple(ui, 'temp', Pins_temp, false);
+	// Add dummy first child instead of a title row.
+	pins.Add(document.createComment(''));
 	pins.AddMultiple(ui, 'gpio', Pins_gpio, false);
 	return [ret, pos];
 } // }}}
@@ -1082,10 +1067,10 @@ ui_modules = { // {{{
 	'Temp Graph': Tempgraph,
 	Multipliers: Multipliers,
 	Gpios: Gpios,
+	'Save Profile': save_profile,
 	'Globals Setup': setup_globals,
 	'Profile Setup': setup_profile,
 	'Probe Setup': setup_probe,
-	'Hardware Setup': setup_hardware,
 	'Cartesian Setup': setup_cartesian,
 	'Axis Setup': setup_axis,
 	'Motor Setup': setup_motor,
@@ -1095,17 +1080,19 @@ ui_modules = { // {{{
 	'Follower Setup': setup_follower,
 	'Temp Setup': setup_temp,
 	'Gpio Setup': setup_gpio,
-	'Pin Setup': setup_pins,
 	'Type Setup': setup_type,
 	State: state,
 	Message: message,
 	'No Connection': noconnect_bar,
+	'Blocker': blocker_bar,
 	Confirmation: confirmation,
 	'ADC reading': ADCread
 }; // }}}
 
 function UI(machine) {	// {{{
 	var ret = Create('div', 'machine hidden');
+	// Prevent updates until all setup is done.
+	ret.updating_globals = true;
 	ret.machine = machine;
 	ret.names = {space: [], axis: [], motor: [], temp: [], gpio: [], unit: []};
 	ret.name_values = {space: [], axis: [], motor: [], temp: [], gpio: [], unit: []};
@@ -1138,8 +1125,10 @@ function UI(machine) {	// {{{
 	// Content.  Set it with a 0 timeout to ensure this function has returned and the objects are ready.
 	setTimeout(function() {
 		ret.bin = UI_setup(ret, ret.machine.user_interface || '(Profile Setup:)', ret);
+		ret.machine.ui_update = false;
+		ret.updating_globals = false;
 		ret.bin.style.top = '2em';
-		globals_update(ret.machine.uuid, true);
+		globals_update(ret.machine.uuid, false);
 	}, 0);
 
 	return ret;

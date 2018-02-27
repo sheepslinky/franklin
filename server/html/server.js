@@ -119,6 +119,7 @@ function _setup_updater() {
 					probemap: null,
 					profile: 'default',
 					user_interface: '',
+					ui_update: true,
 					queue: [],
 					audioqueue: [],
 					queue_length: constants[0],
@@ -136,9 +137,9 @@ function _setup_updater() {
 					fan_id: 255,
 					spindle_id: 255,
 					unit_name: 'mm',
-					park_after_print: true,
-					sleep_after_print: true,
-					cool_after_print: true,
+					park_after_job: true,
+					sleep_after_job: true,
+					cool_after_job: true,
 					spi_setup: '',
 					status: 'Starting',
 					timeout: 0,
@@ -153,6 +154,7 @@ function _setup_updater() {
 					temp_scale_min: 0,
 					temp_scale_max: 0,
 					message: null,
+					blocked: '',
 					confirmation: [null, ''],
 					spaces: [{
 							name: null,
@@ -203,8 +205,12 @@ function _setup_updater() {
 			audio_list = list;
 			trigger_update(null, 'new_audio');
 		},
-		blocked: function(machine, reason) {
-			trigger_update(machine, 'blocked', reason);
+		uploading: function(port, message) {
+			trigger_update(null, 'uploading', port, message);
+		},
+		blocked: function(machine, message) {
+			machines[machine].blocked = message;
+			trigger_update(machine, 'blocked', message);
 		},
 		message: function(machine, stat) {
 			machines[machine].message = stat;
@@ -215,7 +221,7 @@ function _setup_updater() {
 			machines[machine].profile = values[1];
 			var new_num_temps = values[2];
 			var new_num_gpios = values[3];
-			var ui_update = machines[machine].user_interface != values[4];
+			machines[machine].ui_update |= machines[machine].user_interface != values[4];
 			machines[machine].user_interface = values[4];
 			machines[machine].pin_names = values[5];
 			machines[machine].led_pin = values[6];
@@ -238,15 +244,16 @@ function _setup_updater() {
 			machines[machine].targetangle = values[23];
 			machines[machine].zoffset = values[24];
 			machines[machine].store_adc = values[25];
-			machines[machine].park_after_print = values[26];
-			machines[machine].sleep_after_print = values[27];
-			machines[machine].cool_after_print = values[28];
+			machines[machine].park_after_job = values[26];
+			machines[machine].sleep_after_job = values[27];
+			machines[machine].cool_after_job = values[28];
 			machines[machine].spi_setup = values[29];
 			machines[machine].temp_scale_min = values[30];
 			machines[machine].temp_scale_max = values[31];
 			machines[machine].probemap = values[32];
 			machines[machine].connected = values[33];
 			machines[machine].status = values[34];
+			var nums_changed = machines[machine].num_temps != new_num_temps || machines[machine].num_gpios != new_num_gpios;
 			for (var i = machines[machine].num_temps; i < new_num_temps; ++i) {
 				machines[machine].temps.push({
 					name: null,
@@ -276,12 +283,17 @@ function _setup_updater() {
 			}
 			machines[machine].gpios.length = new_num_gpios;
 			machines[machine].num_gpios = new_num_gpios;
-			trigger_update(machine, 'globals_update', ui_update);
+			trigger_update(machine, 'globals_update', machines[machine].ui_update, nums_changed);
 		},
 		space_update: function(machine, index, values) {
+			var nums_changed = false;
 			machines[machine].spaces[index].name = values[0];
 			machines[machine].spaces[index].type = values[1];
+			if (machines[machine].spaces[index].num_axes != values[2].length)
+				nums_changed = true;
 			machines[machine].spaces[index].num_axes = values[2].length;
+			if (machines[machine].spaces[index].num_motors != values[3].length)
+				nums_changed = true;
 			machines[machine].spaces[index].num_motors = values[3].length;
 			var current = [];
 			for (var a = 0; a < machines[machine].spaces[index].num_axes; ++a)
@@ -343,7 +355,7 @@ function _setup_updater() {
 					machines[machine].spaces[index].motor[i].follower_motor = values[5][i][1];
 				}
 			}
-			trigger_update(machine, 'space_update', index);
+			trigger_update(machine, 'space_update', index, nums_changed);
 		},
 		temp_update: function(machine, index, values) {
 			machines[machine].temps[index].name = values[0];
@@ -388,8 +400,13 @@ function _reconnect() {
 			_updater.del_machine(p);
 		_updater.del_port(p);
 	}
-	if (!confirm('The connection to the server was lost.  Reconnect?'))
+	try {
+		if (!confirm('The connection to the server was lost.  Reconnect?'))
+			return;
+	}
+	catch (e) {
 		return;
+	}
 	// Wait a moment before retrying.
 	setTimeout(function() {
 		rpc = Rpc(_updater, _setup_connection, _reconnect);

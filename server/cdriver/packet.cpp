@@ -262,6 +262,14 @@ void packet()
 		//	debug("waiting with move");
 		break;
 	}
+	case CMD_PARSE_GCODE: // Convert a file of G-Code into a machine readable file.
+	{
+		int fulllen = ((command[0][0] & 0xff) << 8) | (command[0][1] & 0xff);
+		int namelen = *reinterpret_cast <short *>(&command[0][3]);
+		parse_gcode(std::string((char *)&command[0][5], namelen), std::string((char *)&command[0][5 + namelen], fulllen - namelen - 5));
+		send_host(CMD_PARSED_GCODE);
+		break;
+	}
 	case CMD_RUN_FILE: // Run commands from a file.
 	{
 #ifdef DEBUG_CMD
@@ -351,13 +359,16 @@ void packet()
 		{
 			debug("Reading invalid temp %d", which);
 			//abort();
-			send_host(CMD_TEMP);
+			send_host(CMD_TEMP, 0, 0, NAN);
 			return;
 		}
 		if (!temps[which].thermistor_pin.valid()) {
-			debug("Reading temp %d with invalid thermistor", which);
-			//abort();
-			send_host(CMD_TEMP);
+			// Before first connection, NUM_PINS is 0; don't break on that.
+			if (NUM_PINS > 0) {
+				debug("Reading temp %d with invalid thermistor", which);
+				//abort();
+			}
+			send_host(CMD_TEMP, 0, 0, NAN);
 			return;
 		}
 		arch_request_temp(which);
@@ -761,7 +772,7 @@ void packet()
 		debug("CMD_TP_GETPOS");
 #endif
 		// TODO: Send actual current position, not next queued.  Include fraction.
-		send_host(CMD_TP_POS, 0, 0, history[running_fragment].run_file_current);
+		send_host(CMD_TP_POS, 0, 0, settings.run_file_current);
 		return;
 	}
 	case CMD_TP_SETPOS:
